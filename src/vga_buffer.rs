@@ -6,8 +6,11 @@ use volatile::Volatile;
 
 lazy_static!{
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer{
+        line: false,
+        line_interval: 0,
+        selected_pos: 0,
         column_position: 0,
-        color_code: ColorCode::new(Color::Green, Color::Blue),
+        color_code: ColorCode::new(Color::Green, Color::Black),
         buffer: unsafe {
             &mut *(0xb8000 as *mut Buffer)
         },
@@ -28,7 +31,11 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments){
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    use x86_64::instructions::interrupts;
+
+    interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    })
 }
 
 #[allow(dead_code)]
@@ -70,8 +77,8 @@ struct ScreenChar{
     color: ColorCode,
 }
 
-const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH: usize = 80;
+pub const BUFFER_HEIGHT: usize = 25;
+pub const BUFFER_WIDTH: usize = 80;
 
 #[repr(transparent)]
 struct Buffer{
@@ -80,6 +87,9 @@ struct Buffer{
 
 
 pub struct Writer{
+    line: bool,
+    line_interval: usize,
+    selected_pos: usize,
     column_position: usize,
     color_code: ColorCode,
     buffer: &'static mut Buffer,
@@ -97,6 +107,8 @@ impl Writer {
     }
     
     pub fn write_byte(&mut self, byte: u8){
+        self.line_interval = 3;
+        self.delete_line();
         match byte {
             b'\n' => self.new_line(),
             byte => {
@@ -114,9 +126,80 @@ impl Writer {
                 self.column_position += 1;
             }
         }
+        self.draw_line(true);
     }
 
-    fn new_line(&mut self){
+   
+    pub fn delete_last_char(&mut self){
+        self.line_interval = 3;
+        self.delete_line();
+        if self.column_position <= 2{
+            self.column_position = 2;
+            return;
+        }
+        
+        let row = BUFFER_HEIGHT - 1;
+        let col = self.column_position - 1;
+        let color = self.color_code;
+        self.buffer.chars[row][col].write( ScreenChar{
+            ascii_char: b' ',
+            color
+        });
+        self.column_position -= 1;
+        self.draw_line(true);
+    }
+
+    pub fn update_line(&mut self){
+        if self.line_interval >= 10 {
+            if self.line{
+                self.line = false;
+                self.delete_line();
+            }else{
+                self.line = true;
+                self.draw_line(false);
+            }   
+            self.line_interval = 0;
+        }else{
+            self.line_interval += 1;
+        }
+    }
+
+    fn draw_line(&mut self, force: bool){
+        if !self.line && !force{
+            return;
+        }
+        let row = BUFFER_HEIGHT - 1;
+        let col = self.column_position;
+        self.selected_pos = col;
+        let color = self.color_code;
+        self.buffer.chars[row][col].write( ScreenChar{
+            ascii_char: 179,
+            color
+        });
+    }
+
+    fn delete_line(&mut self){
+        if self.selected_pos == 0{
+            return;
+        }
+        let row = BUFFER_HEIGHT - 1;
+        let color = self.color_code;
+        self.buffer.chars[row][self.selected_pos].write( ScreenChar{
+            ascii_char: 0,
+            color
+        });
+    }
+
+    pub fn get_last_line(&mut self, buf: &mut [u8; BUFFER_WIDTH]){
+        let row = BUFFER_HEIGHT - 1;
+        let col = self.column_position;
+        for col in 0..col{
+            buf[col] = self.buffer.chars[row][col].read().ascii_char;
+        }
+    }
+
+    pub fn new_line(&mut self){
+        self.delete_line();
         for row in 1..BUFFER_HEIGHT{
             for col in 0..BUFFER_WIDTH{
                 let character = self.buffer.chars[row][col].read();
@@ -125,11 +208,23 @@ impl Writer {
         }
         self.clear_row(BUFFER_HEIGHT - 1);
         self.column_position = 0;
+        self.draw_line(true);
+    }
+
+    fn prev_line(&mut self){
+        for row in 1..BUFFER_HEIGHT{
+            for col in 0..BUFFER_WIDTH{
+                let character = self.buffer.chars[row][col].read();
+                self.buffer.chars[row + 1][col].write(character)
+            }
+        }
+        //self.clear_row(1);
+        self.column_position = BUFFER_WIDTH - 1;
     }
 
     fn clear_row(&mut self, row: usize){
         let blank = ScreenChar{
-            ascii_char: b' ',
+            ascii_char: 0,
             color: ColorCode::new(Color::Black, Color::Black),
         };
         for col in 0..BUFFER_WIDTH {
@@ -145,4 +240,14 @@ impl fmt::Write for Writer {
         Ok(())
     }
     
+}
+
+#[test_case]
+fn test_println_output() {
+    let s = "Single line test with println by char";
+    println!("{}", s);
+    for (i, c) in s.chars().enumerate() {
+        let screen_char = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 2][i].read();
+        assert_eq!(char::from(screen_char.ascii_char), c);
+    }
 }

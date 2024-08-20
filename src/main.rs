@@ -5,7 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use mythic_os::println;
+use mythic_os::{command, print, println};
 
 
 #[no_mangle]
@@ -13,24 +13,22 @@ pub extern "C" fn _start() -> ! {
 
     mythic_os::init();
 
-    fn stack_overflow(){
-        stack_overflow();
-    }
-    stack_overflow();
-
    _main();
+
 
    #[cfg(test)]
     test_main();
     
-   loop {}
+    mythic_os::hlt_loop()
 }
 
 
 fn _main(){
-    println!("Hola");
-    println!("Mundo");
+    println!("Hello World");
+    command::start_command();
+
 }
+
 
 
 
@@ -38,7 +36,7 @@ fn _main(){
 #[panic_handler]
 fn panic(info: &PanicInfo) -> !{
     println!("{}", info);
-    loop {}
+    mythic_os::hlt_loop()
 }
 
 
